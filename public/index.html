@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Halloween Outfit Awards</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Creepster&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>Halloween<br>Outfit Awards</h1>
+
+    <form id="login" class="stack" hidden>
+      <label for="code">Je toegangscode</label>
+      <input id="code" maxlength="6" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required>
+      <button type="submit">Inloggen</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+
+    <section id="vote" class="stack" hidden>
+      <p>Hoi <strong id="me"></strong>! Wie heeft de beste outfit? Tik op een naam.</p>
+      <div id="candidates" class="choices"></div>
+      <p id="no-candidates" class="muted" hidden>Er staan nog geen andere gasten op de lijst.</p>
+      <button id="confirm" type="button" disabled>Kies iemand</button>
+      <p id="vote-status" class="status" role="status"></p>
+      <button id="logout" type="button" class="link">Uitloggen</button>
+    </section>
+
+    <section id="closed" class="stack center" hidden>
+      <p class="big">De stemming is gesloten.</p>
+      <p class="muted">De winnaar wordt zo bekendgemaakt!</p>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let state = { vote: null, selected: null, candidates: [] };
+
+    function show(id) {
+      for (const section of ['login', 'vote', 'closed']) $(section).hidden = section !== id;
+    }
+
+    async function api(method, path, body) {
+      const res = await fetch(path, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      return { status: res.status, data };
+    }
+
+    function render() {
+      $('candidates').replaceChildren(...state.candidates.map((c) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'choice';
+        button.textContent = c.name;
+        button.setAttribute('aria-pressed', String(c.guid === state.selected));
+        if (c.guid === state.vote) {
+          const tag = document.createElement('span');
+          tag.className = 'tag';
+          tag.textContent = 'jouw stem';
+          button.append(tag);
+        }
+        button.onclick = () => {
+          state.selected = c.guid;
+          $('vote-status').textContent = '';
+          render();
+        };
+        return button;
+      }));
+      $('no-candidates').hidden = state.candidates.length > 0;
+
+      const selected = state.candidates.find((c) => c.guid === state.selected);
+      const confirm = $('confirm');
+      confirm.disabled = !selected || state.selected === state.vote;
+      confirm.textContent = !selected ? 'Kies iemand'
+        : state.selected === state.vote ? `Je stem staat op ${selected.name}`
+        : `Bevestig stem op ${selected.name}`;
+    }
+
+    async function loadMe() {
+      const { status, data } = await api('GET', '/api/me');
+      if (status === 403) return show('closed');
+      if (status !== 200) return show('login');
+      state = { vote: data.vote, selected: data.vote, candidates: data.candidates };
+      $('me').textContent = data.name;
+      render();
+      show('vote');
+    }
+
+    $('login').onsubmit = async (event) => {
+      event.preventDefault();
+      $('login-error').textContent = '';
+      const { status, data } = await api('POST', '/api/login', { code: $('code').value });
+      if (status === 403) return show('closed');
+      if (status !== 200) {
+        $('login-error').textContent = data.error ?? 'Inloggen mislukt.';
+        return;
+      }
+      history.replaceState(null, '', '/');
+      loadMe();
+    };
+
+    $('confirm').onclick = async () => {
+      const confirm = $('confirm');
+      confirm.disabled = true;
+      const { status, data } = await api('PUT', '/api/vote', { guid: state.selected });
+      if (status === 403) return show('closed');
+      if (status === 401) return show('login');
+      const message = $('vote-status');
+      if (status !== 200) {
+        message.className = 'status error';
+        message.textContent = data.error ?? 'Stemmen mislukt, probeer opnieuw.';
+        render();
+        return;
+      }
+      state.vote = data.vote;
+      render();
+      message.className = 'status';
+      message.textContent = 'Stem opgeslagen! Zolang de stemming open is kun je nog wisselen.';
+    };
+
+    $('logout').onclick = async () => {
+      await api('POST', '/api/logout');
+      $('code').value = '';
+      show('login');
+    };
+
+    // The SMS link carries the code; prefill it so the guest only taps "Inloggen".
+    const codeFromLink = new URLSearchParams(location.search).get('code');
+    if (codeFromLink) {
+      $('code').value = codeFromLink.toUpperCase();
+      show('login');
+    } else {
+      loadMe();
+    }
+  </script>
+</body>
+</html>
