@@ -15,8 +15,8 @@
     <h1>Outfit Awards Admin</h1>
 
     <form id="login" class="stack" hidden>
-      <label for="password">Admin wachtwoord</label>
-      <input id="password" type="password" autocomplete="current-password" required>
+      <label for="code">Admin code</label>
+      <input id="code" maxlength="6" minlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" title="6 cijfers" required>
       <button type="submit">Inloggen</button>
       <p id="login-error" class="error" role="alert"></p>
     </form>
@@ -51,7 +51,7 @@
 
       <ul id="guests" class="guests"></ul>
       <p id="empty" class="muted" hidden>Nog geen gasten. Voeg ze hierboven toe.</p>
-      <p class="muted">Tip: zet jezelf ook op de lijst, dan kun je zelf ook stemmen.</p>
+      <p class="muted">Tip: je staat zelf al op de lijst als admin, dus je kunt ook stemmen en op je stemmen.</p>
       <button id="logout" type="button" class="link">Uitloggen</button>
     </section>
   </main>
@@ -94,7 +94,7 @@
     function render() {
       const { closed, users } = data;
       const voted = users.filter((u) => u.has_voted).length;
-      const unsent = users.filter((u) => !u.sms_sent_at).length;
+      const unsent = users.filter((u) => !u.is_admin && !u.sms_sent_at).length;
 
       $('state').textContent = closed ? 'Stemming gesloten' : 'Stemming open';
       $('state').className = closed ? 'pill closed' : 'pill';
@@ -114,23 +114,25 @@
         main.append(el('strong', '', u.name), el('span', '', u.phone));
 
         const meta = el('div', 'guest-meta');
-        meta.append(
-          el('code', '', u.access_code),
-          el('span', u.sms_sent_at ? 'badge ok' : 'badge', u.sms_sent_at ? `SMS ${formatTime(u.sms_sent_at)}` : 'geen SMS'),
-          el('span', u.has_voted ? 'badge ok' : 'badge', u.has_voted ? 'gestemd' : 'niet gestemd'),
-        );
+        meta.append(el('code', '', u.access_code));
+        if (u.is_admin) meta.append(el('span', 'badge ok', 'admin'));
+        else meta.append(el('span', u.sms_sent_at ? 'badge ok' : 'badge', u.sms_sent_at ? `SMS ${formatTime(u.sms_sent_at)}` : 'geen SMS'));
+        meta.append(el('span', u.has_voted ? 'badge ok' : 'badge', u.has_voted ? 'gestemd' : 'niet gestemd'));
 
+        // The admin code is fixed and the admin cannot be removed, so no buttons.
         const actions = el('div', 'guest-actions');
-        if (!closed) {
-          const resend = el('button', 'small ghost', 'Opnieuw sturen');
-          resend.type = 'button';
-          resend.onclick = () => resendAccess(u, resend);
-          actions.append(resend);
+        if (!u.is_admin) {
+          if (!closed) {
+            const resend = el('button', 'small ghost', 'Opnieuw sturen');
+            resend.type = 'button';
+            resend.onclick = () => resendAccess(u, resend);
+            actions.append(resend);
+          }
+          const remove = el('button', 'small danger', 'Verwijder');
+          remove.type = 'button';
+          remove.onclick = () => removeGuest(u);
+          actions.append(remove);
         }
-        const remove = el('button', 'small danger', 'Verwijder');
-        remove.type = 'button';
-        remove.onclick = () => removeGuest(u);
-        actions.append(remove);
 
         const li = el('li', 'guest');
         li.append(main, meta, actions);
@@ -182,15 +184,22 @@
       load();
     }
 
+    // Codes are exactly 6 digits: drop anything else while typing.
+    $('code').oninput = () => { $('code').value = $('code').value.replace(/\D/g, '').slice(0, 6); };
+
     $('login').onsubmit = async (event) => {
       event.preventDefault();
       $('login-error').textContent = '';
-      const { ok, data: result } = await api('POST', '/api/admin/login', { password: $('password').value });
+      if (!/^\d{6}$/.test($('code').value)) {
+        $('login-error').textContent = 'Een code bestaat uit 6 cijfers.';
+        return;
+      }
+      const { ok, data: result } = await api('POST', '/api/admin/login', { code: $('code').value });
       if (!ok) {
         $('login-error').textContent = result.error ?? 'Inloggen mislukt.';
         return;
       }
-      $('password').value = '';
+      $('code').value = '';
       load();
     };
 
@@ -205,7 +214,7 @@
     };
 
     $('send-all').onclick = async () => {
-      const unsent = data.users.filter((u) => !u.sms_sent_at).length;
+      const unsent = data.users.filter((u) => !u.is_admin && !u.sms_sent_at).length;
       if (!confirm(`Toegangscode en link versturen naar ${unsent} ${unsent === 1 ? 'gast' : 'gasten'}?`)) return;
       sending = true;
       render();
@@ -228,7 +237,7 @@
     };
 
     $('logout').onclick = async () => {
-      await api('POST', '/api/admin/logout');
+      await api('POST', '/api/logout');
       show('login');
     };
 

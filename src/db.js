@@ -3,9 +3,13 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomInt, randomUUID } from 'node:crypto';
 
-// No 0/O or 1/I, so a code read from an SMS cannot be misread.
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+// Access codes are always exactly 6 digits.
 const CODE_LENGTH = 6;
+export const CODE_PATTERN = /^\d{6}$/;
+
+// The one admin account, created on every start with a fixed login code.
+const ADMIN_NAME = 'Admin';
+const ADMIN_CODE = '123456';
 
 const dbPath = process.env.DB_PATH ?? 'data/halloween.db';
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -22,17 +26,44 @@ db.exec(`
     access_code TEXT NOT NULL UNIQUE,
     vote        TEXT REFERENCES users(guid) ON DELETE SET NULL,
     allow_vote  INTEGER NOT NULL DEFAULT 1,
-    sms_sent_at TEXT
+    sms_sent_at TEXT,
+    is_admin    INTEGER NOT NULL DEFAULT 0
   );
 `);
+
+// Databases from before the admin account existed lack the column.
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'is_admin')) {
+  db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
+}
 
 function newAccessCode() {
   const taken = db.prepare('SELECT 1 FROM users WHERE access_code = ?');
   for (;;) {
-    let code = '';
-    for (let i = 0; i < CODE_LENGTH; i++) code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
-    if (!taken.get(code)) return code;
+    const code = String(randomInt(10 ** CODE_LENGTH)).padStart(CODE_LENGTH, '0');
+    if (code !== ADMIN_CODE && !taken.get(code)) return code;
   }
+}
+
+// Creates or repairs the admin so the fixed code always works.
+export function ensureAdmin() {
+  const holder = db.prepare('SELECT * FROM users WHERE access_code = ?').get(ADMIN_CODE);
+  const admin = db.prepare('SELECT * FROM users WHERE is_admin = 1').get()
+    ?? db.prepare('SELECT * FROM users WHERE name = ? COLLATE NOCASE').get(ADMIN_NAME);
+  if (holder && holder.guid !== admin?.guid) renewAccessCode(holder.guid);
+  if (admin) {
+    db.prepare('UPDATE users SET is_admin = 1, access_code = ?, sms_sent_at = NULL WHERE guid = ?')
+      .run(ADMIN_CODE, admin.guid);
+    return;
+  }
+  const guid = randomUUID();
+  db.prepare('INSERT INTO users (guid, name, phone, access_code, allow_vote, is_admin) VALUES (?, ?, ?, ?, ?, 1)')
+    .run(guid, ADMIN_NAME, '', ADMIN_CODE, isVotingClosed() ? 0 : 1);
+}
+
+// Codes from before the digits-only rule would lock their guest out; give them a new one.
+export function renewLegacyCodes() {
+  const legacy = db.prepare("SELECT guid FROM users WHERE access_code NOT GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'").all();
+  for (const { guid } of legacy) renewAccessCode(guid);
 }
 
 export function listUsers() {
@@ -70,7 +101,7 @@ export function createUser(name, phone) {
 }
 
 export function deleteUser(guid) {
-  return db.prepare('DELETE FROM users WHERE guid = ?').run(guid).changes > 0;
+  return db.prepare('DELETE FROM users WHERE guid = ? AND is_admin = 0').run(guid).changes > 0;
 }
 
 export function setVote(voterGuid, targetGuid) {

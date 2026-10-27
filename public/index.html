@@ -15,7 +15,7 @@
 
     <form id="login" class="stack" hidden>
       <label for="code">Je toegangscode</label>
-      <input id="code" maxlength="6" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required>
+      <input id="code" maxlength="6" minlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" title="6 cijfers" required>
       <button type="submit">Inloggen</button>
       <p id="login-error" class="error" role="alert"></p>
     </form>
@@ -93,9 +93,16 @@
       show('vote');
     }
 
+    // Codes are exactly 6 digits: drop anything else while typing.
+    $('code').oninput = () => { $('code').value = $('code').value.replace(/\D/g, '').slice(0, 6); };
+
     $('login').onsubmit = async (event) => {
       event.preventDefault();
       $('login-error').textContent = '';
+      if (!/^\d{6}$/.test($('code').value)) {
+        $('login-error').textContent = 'Een code bestaat uit 6 cijfers.';
+        return;
+      }
       const { status, data } = await api('POST', '/api/login', { code: $('code').value });
       if (status === 403) return show('closed');
       if (status !== 200) {
@@ -134,7 +141,7 @@
     // The SMS link carries the code; prefill it so the guest only taps "Inloggen".
     const codeFromLink = new URLSearchParams(location.search).get('code');
     if (codeFromLink) {
-      $('code').value = codeFromLink.toUpperCase();
+      $('code').value = codeFromLink.replace(/\D/g, '').slice(0, 6);
       show('login');
     } else {
       loadMe();

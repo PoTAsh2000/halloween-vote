@@ -1,22 +1,16 @@
 import express from 'express';
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as db from './db.js';
 import { sendSms, smsDryRun } from './sms.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/+$/, '');
 const PUBLIC_DIR = fileURLToPath(new URL('../public', import.meta.url));
 
-if (!ADMIN_PASSWORD) {
-  console.error('ADMIN_PASSWORD is not set, refusing to start.');
-  process.exit(1);
-}
+db.renewLegacyCodes();
+db.ensureAdmin();
 
 const USER_COOKIE = 'hv_user';
-const ADMIN_COOKIE = 'hv_admin';
-const ADMIN_TOKEN = sha256(`hv-admin:${ADMIN_PASSWORD}`);
 const COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: 'lax',
@@ -27,14 +21,6 @@ const COOKIE_OPTIONS = {
 const MAX_FAILED_LOGINS = 20;
 const FAILED_LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const failedLogins = new Map();
-
-function sha256(value) {
-  return createHash('sha256').update(String(value)).digest('hex');
-}
-
-function safeEqual(a, b) {
-  return timingSafeEqual(Buffer.from(sha256(a)), Buffer.from(sha256(b)));
-}
 
 function readCookie(req, name) {
   for (const part of (req.headers.cookie ?? '').split(';')) {
@@ -86,16 +72,26 @@ function requireUser(req, res, next) {
   next();
 }
 
-app.post('/api/login', (req, res) => {
-  const limitKey = `user:${req.ip}`;
+// Looks the code up and counts a miss against the caller's IP. Sends the error itself and returns null on failure.
+function loginWithCode(req, res) {
+  const limitKey = `login:${req.ip}`;
   if (isLockedOut(limitKey)) {
-    return res.status(429).json({ error: 'Te veel foute pogingen. Probeer het over een kwartier opnieuw.' });
+    res.status(429).json({ error: 'Te veel foute pogingen. Probeer het over een kwartier opnieuw.' });
+    return null;
   }
-  const user = db.findUserByCode(String(req.body?.code ?? '').trim().toUpperCase());
+  const code = String(req.body?.code ?? '').trim();
+  const user = db.CODE_PATTERN.test(code) ? db.findUserByCode(code) : undefined;
   if (!user) {
     recordFailedLogin(limitKey);
-    return res.status(401).json({ error: 'Deze code klopt niet.' });
+    res.status(401).json({ error: 'Deze code klopt niet.' });
+    return null;
   }
+  return user;
+}
+
+app.post('/api/login', (req, res) => {
+  const user = loginWithCode(req, res);
+  if (!user) return;
   if (!user.allow_vote) return res.status(403).json({ error: 'De stemming is gesloten.' });
   res.cookie(USER_COOKIE, user.access_code, COOKIE_OPTIONS);
   res.json({ name: user.name });
@@ -121,10 +117,10 @@ app.put('/api/vote', requireUser, (req, res) => {
 
 // ---- Admin ----
 
+// The admin is the one user with is_admin set. Unlike guests, the admin keeps access after voting closes.
 function requireAdmin(req, res, next) {
-  if (!safeEqual(readCookie(req, ADMIN_COOKIE), ADMIN_TOKEN)) {
-    return res.status(401).json({ error: 'Niet ingelogd als admin.' });
-  }
+  const user = db.findUserByCode(readCookie(req, USER_COOKIE));
+  if (!user?.is_admin) return res.status(401).json({ error: 'Niet ingelogd als admin.' });
   next();
 }
 
@@ -134,20 +130,10 @@ function requireOpenVoting(req, res, next) {
 }
 
 app.post('/api/admin/login', (req, res) => {
-  const limitKey = `admin:${req.ip}`;
-  if (isLockedOut(limitKey)) {
-    return res.status(429).json({ error: 'Te veel foute pogingen. Probeer het over een kwartier opnieuw.' });
-  }
-  if (!safeEqual(req.body?.password ?? '', ADMIN_PASSWORD)) {
-    recordFailedLogin(limitKey);
-    return res.status(401).json({ error: 'Fout wachtwoord.' });
-  }
-  res.cookie(ADMIN_COOKIE, ADMIN_TOKEN, COOKIE_OPTIONS);
-  res.status(204).end();
-});
-
-app.post('/api/admin/logout', (req, res) => {
-  res.clearCookie(ADMIN_COOKIE, COOKIE_OPTIONS);
+  const user = loginWithCode(req, res);
+  if (!user) return;
+  if (!user.is_admin) return res.status(403).json({ error: 'Deze code heeft geen adminrechten.' });
+  res.cookie(USER_COOKIE, user.access_code, COOKIE_OPTIONS);
   res.status(204).end();
 });
 
@@ -162,6 +148,7 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
       phone: u.phone,
       access_code: u.access_code,
       has_voted: u.vote !== null,
+      is_admin: Boolean(u.is_admin),
       sms_sent_at: u.sms_sent_at,
     })),
   });
@@ -185,7 +172,9 @@ app.delete('/api/admin/users/:guid', requireAdmin, (req, res) => {
 
 // New access code first; only when that succeeds the SMS goes out again.
 app.post('/api/admin/users/:guid/resend', requireAdmin, requireOpenVoting, async (req, res) => {
-  if (!db.findUserByGuid(req.params.guid)) return res.status(404).json({ error: 'Gast niet gevonden.' });
+  const target = db.findUserByGuid(req.params.guid);
+  if (!target) return res.status(404).json({ error: 'Gast niet gevonden.' });
+  if (target.is_admin) return res.status(400).json({ error: 'De code van de admin staat vast.' });
   const user = db.renewAccessCode(req.params.guid);
   try {
     await sendAccess(user);
@@ -204,10 +193,10 @@ app.post('/api/admin/send-access', requireAdmin, requireOpenVoting, async (req, 
   let sent = 0;
   const failed = [];
   try {
-    for (const { guid } of db.listUsers().filter((u) => !u.sms_sent_at)) {
+    for (const { guid } of db.listUsers().filter((u) => !u.is_admin && !u.sms_sent_at)) {
       // Re-read: the guest may be deleted or have a new code while earlier SMS were sending.
       const user = db.findUserByGuid(guid);
-      if (!user || user.sms_sent_at) continue;
+      if (!user || user.is_admin || user.sms_sent_at) continue;
       try {
         await sendAccess(user);
         sent++;
