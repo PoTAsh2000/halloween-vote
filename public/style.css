@@ -157,14 +157,6 @@ button.link:hover:not(:disabled) { background: none; color: var(--text); }
 }
 .pill.closed { color: var(--red); background: #2d1616; }
 
-.notice {
-  padding: 10px 14px;
-  font-size: .9rem;
-  color: var(--muted);
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-}
-
 .winner {
   padding: 20px;
   text-align: center;

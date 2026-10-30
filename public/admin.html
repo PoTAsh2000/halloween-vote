@@ -27,10 +27,6 @@
         <span id="progress" class="muted"></span>
       </div>
 
-      <p id="dry-run" class="notice" hidden>
-        SMS_GATEWAY_URL is niet ingesteld: berichten komen alleen in de serverlog, er gaat geen echte SMS uit.
-      </p>
-
       <div id="winner" class="winner" hidden>
         <p id="winner-label" class="label"></p>
         <p id="winner-names" class="names"></p>
@@ -39,12 +35,10 @@
 
       <form id="add" class="add-form">
         <input id="name" placeholder="Naam" maxlength="40" aria-label="Naam" required>
-        <input id="phone" placeholder="06 12345678" inputmode="tel" aria-label="Telefoonnummer" required>
         <button type="submit">Toevoegen</button>
       </form>
 
       <div class="actions">
-        <button id="send-all" type="button">Verstuur toegang</button>
         <button id="close" type="button" class="danger">Sluit stemming</button>
       </div>
       <p id="message" class="status" role="status"></p>
@@ -59,7 +53,6 @@
   <script>
     const $ = (id) => document.getElementById(id);
     let data = { closed: false, users: [] };
-    let sending = false;
 
     function show(id) {
       for (const section of ['login', 'dashboard']) $(section).hidden = section !== id;
@@ -94,39 +87,39 @@
     function render() {
       const { closed, users } = data;
       const voted = users.filter((u) => u.has_voted).length;
-      const unsent = users.filter((u) => !u.is_admin && !u.sms_sent_at).length;
+      const notCopied = users.filter((u) => !u.is_admin && !u.copied_at).length;
 
       $('state').textContent = closed ? 'Stemming gesloten' : 'Stemming open';
       $('state').className = closed ? 'pill closed' : 'pill';
-      $('progress').textContent = `${voted} van ${users.length} gestemd`;
-      $('dry-run').hidden = !data.smsDryRun;
+      $('progress').textContent = `${voted} van ${users.length} gestemd`
+        + (!closed && notCopied ? `, ${notCopied} nog niet uitgenodigd` : '');
       $('add').hidden = closed;
-      $('send-all').hidden = closed;
       $('close').hidden = closed;
-      $('send-all').disabled = sending || unsent === 0;
-      $('send-all').textContent = sending ? 'Versturen...'
-        : unsent ? `Verstuur toegang (${unsent})` : 'Iedereen heeft een SMS';
       $('close').disabled = users.length === 0;
       $('empty').hidden = users.length > 0;
 
       $('guests').replaceChildren(...users.map((u) => {
         const main = el('div', 'guest-main');
-        main.append(el('strong', '', u.name), el('span', '', u.phone));
+        main.append(el('strong', '', u.name));
 
         const meta = el('div', 'guest-meta');
         meta.append(el('code', '', u.access_code));
         if (u.is_admin) meta.append(el('span', 'badge ok', 'admin'));
-        else meta.append(el('span', u.sms_sent_at ? 'badge ok' : 'badge', u.sms_sent_at ? `SMS ${formatTime(u.sms_sent_at)}` : 'geen SMS'));
+        else meta.append(el('span', u.copied_at ? 'badge ok' : 'badge', u.copied_at ? `gekopieerd ${formatTime(u.copied_at)}` : 'nog niet gekopieerd'));
         meta.append(el('span', u.has_voted ? 'badge ok' : 'badge', u.has_voted ? 'gestemd' : 'niet gestemd'));
 
         // The admin code is fixed and the admin cannot be removed, so no buttons.
         const actions = el('div', 'guest-actions');
         if (!u.is_admin) {
           if (!closed) {
-            const resend = el('button', 'small ghost', 'Opnieuw sturen');
-            resend.type = 'button';
-            resend.onclick = () => resendAccess(u, resend);
-            actions.append(resend);
+            // Always available, also after copying: the guest may not have received it.
+            const copy = el('button', 'small', 'Kopieer uitnodiging');
+            copy.type = 'button';
+            copy.onclick = () => copyInvite(u);
+            const renew = el('button', 'small ghost', 'Nieuwe code');
+            renew.type = 'button';
+            renew.onclick = () => renewCode(u, renew);
+            actions.append(copy, renew);
           }
           const remove = el('button', 'small danger', 'Verwijder');
           remove.type = 'button';
@@ -169,11 +162,38 @@
       if (data.closed) renderWinner();
     }
 
-    async function resendAccess(user, button) {
-      if (!confirm(`Nieuwe code maken en opnieuw sturen naar ${user.name}? De oude code werkt dan niet meer.`)) return;
+    // The Clipboard API only works on https or localhost; fall back to a hidden textarea on plain http.
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        const area = el('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.append(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        return copied;
+      }
+    }
+
+    async function copyInvite(user) {
+      if (!(await copyText(user.invite))) return say(`Kopiëren mislukt. Code van ${user.name}: ${user.access_code}`, true);
+      const { ok, data: result } = await api('POST', `/api/admin/users/${user.guid}/copied`);
+      say(ok ? `Uitnodiging voor ${user.name} gekopieerd. Plak hem in WhatsApp of een SMS.` : result.error ?? 'Opslaan mislukt.', !ok);
+      load();
+    }
+
+    async function renewCode(user, button) {
+      if (!confirm(`Nieuwe code maken voor ${user.name}? De oude code werkt dan niet meer.`)) return;
       button.disabled = true;
-      const { ok, data: result } = await api('POST', `/api/admin/users/${user.guid}/resend`);
-      say(ok ? `Nieuwe code verstuurd naar ${user.name}.` : result.error ?? 'Opnieuw sturen mislukt.', !ok);
+      const { ok, data: result } = await api('POST', `/api/admin/users/${user.guid}/renew-code`);
+      say(ok ? `Nieuwe code voor ${user.name}: ${result.access_code}. Kopieer en stuur de uitnodiging opnieuw.`
+        : result.error ?? 'Nieuwe code maken mislukt.', !ok);
       load();
     }
 
@@ -205,25 +225,11 @@
 
     $('add').onsubmit = async (event) => {
       event.preventDefault();
-      const { ok, data: result } = await api('POST', '/api/admin/users', { name: $('name').value, phone: $('phone').value });
+      const { ok, data: result } = await api('POST', '/api/admin/users', { name: $('name').value });
       if (!ok) return say(result.error ?? 'Toevoegen mislukt.', true);
-      say(`${result.name} toegevoegd.`);
+      say(`${result.name} toegevoegd met code ${result.access_code}. Klik "Kopieer uitnodiging" om hem te sturen.`);
       $('add').reset();
       $('name').focus();
-      load();
-    };
-
-    $('send-all').onclick = async () => {
-      const unsent = data.users.filter((u) => !u.is_admin && !u.sms_sent_at).length;
-      if (!confirm(`Toegangscode en link versturen naar ${unsent} ${unsent === 1 ? 'gast' : 'gasten'}?`)) return;
-      sending = true;
-      render();
-      const { ok, data: result } = await api('POST', '/api/admin/send-access');
-      sending = false;
-      if (!ok) say(result.error ?? 'Versturen mislukt.', true);
-      else if (result.failed.length) {
-        say(`${result.sent} verstuurd, mislukt: ${result.failed.map((f) => `${f.name} (${f.error})`).join('; ')}`, true);
-      } else say(`${result.sent} SMS verstuurd.`);
       load();
     };
 
@@ -243,7 +249,7 @@
 
     // Keep the "gestemd" badges live while guests vote.
     setInterval(() => {
-      if (!document.hidden && !$('dashboard').hidden && !sending) load();
+      if (!document.hidden && !$('dashboard').hidden) load();
     }, 10_000);
 
     load();

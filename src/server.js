@@ -1,7 +1,6 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import * as db from './db.js';
-import { sendSms, smsDryRun } from './sms.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/+$/, '');
@@ -42,18 +41,16 @@ function recordFailedLogin(key) {
   failedLogins.set(key, entry);
 }
 
-// Dutch numbers like 06-12345678 become +31612345678; the gateway wants E.164.
-function normalizePhone(raw) {
-  let phone = String(raw ?? '').replace(/[\s\-().]/g, '');
-  if (phone.startsWith('00')) phone = `+${phone.slice(2)}`;
-  else if (phone.startsWith('0')) phone = `+31${phone.slice(1)}`;
-  return /^\+\d{8,15}$/.test(phone) ? phone : null;
-}
-
-async function sendAccess(user) {
+// The text the admin copies and sends to a guest by hand. The link prefills the code on the login page.
+function inviteText(user) {
   const link = `${PUBLIC_URL}/?code=${user.access_code}`;
-  await sendSms(user.phone, `Hoi ${user.name}! Stem op de beste Halloween-outfit: ${link} Je toegangscode: ${user.access_code}`);
-  db.markSmsSent(user.guid);
+  return [
+    `Hoi ${user.name}! 🎃 Stem vanavond op de beste Halloween-outfit.`,
+    `1. Open ${link}`,
+    `2. Je code staat al ingevuld (anders typ je ${user.access_code}), tik op Inloggen.`,
+    '3. Kies je favoriete outfit. Op jezelf stemmen kan niet, wisselen mag zolang de stemming open is.',
+    `Je toegangscode: ${user.access_code}`,
+  ].join('\n');
 }
 
 const app = express();
@@ -141,28 +138,25 @@ app.post('/api/admin/login', (req, res) => {
 app.get('/api/admin/users', requireAdmin, (req, res) => {
   res.json({
     closed: db.isVotingClosed(),
-    smsDryRun,
     users: db.listUsers().map((u) => ({
       guid: u.guid,
       name: u.name,
-      phone: u.phone,
       access_code: u.access_code,
       has_voted: u.vote !== null,
       is_admin: Boolean(u.is_admin),
-      sms_sent_at: u.sms_sent_at,
+      copied_at: u.copied_at,
+      invite: inviteText(u),
     })),
   });
 });
 
 app.post('/api/admin/users', requireAdmin, (req, res) => {
   const name = String(req.body?.name ?? '').trim();
-  const phone = normalizePhone(req.body?.phone);
   if (!name || name.length > 40) return res.status(400).json({ error: 'Vul een naam in (max 40 tekens).' });
-  if (!phone) return res.status(400).json({ error: 'Ongeldig telefoonnummer. Gebruik 06... of +31...' });
   if (db.nameExists(name)) {
     return res.status(409).json({ error: `${name} staat al op de lijst. Maak de naam uniek, bv. "${name} B."` });
   }
-  res.status(201).json(db.createUser(name, phone));
+  res.status(201).json(db.createUser(name));
 });
 
 app.delete('/api/admin/users/:guid', requireAdmin, (req, res) => {
@@ -170,44 +164,20 @@ app.delete('/api/admin/users/:guid', requireAdmin, (req, res) => {
   res.status(204).end();
 });
 
-// New access code first; only when that succeeds the SMS goes out again.
-app.post('/api/admin/users/:guid/resend', requireAdmin, requireOpenVoting, async (req, res) => {
+// The admin marks an invite as copied, so the list shows who still needs one. Copying again just updates the time.
+app.post('/api/admin/users/:guid/copied', requireAdmin, requireOpenVoting, (req, res) => {
+  const target = db.findUserByGuid(req.params.guid);
+  if (!target) return res.status(404).json({ error: 'Gast niet gevonden.' });
+  res.json({ copied_at: db.markCopied(target.guid) });
+});
+
+// A new code makes the old invite useless, so the admin has to copy and send a fresh one.
+app.post('/api/admin/users/:guid/renew-code', requireAdmin, requireOpenVoting, (req, res) => {
   const target = db.findUserByGuid(req.params.guid);
   if (!target) return res.status(404).json({ error: 'Gast niet gevonden.' });
   if (target.is_admin) return res.status(400).json({ error: 'De code van de admin staat vast.' });
-  const user = db.renewAccessCode(req.params.guid);
-  try {
-    await sendAccess(user);
-  } catch (err) {
-    return res.status(502).json({ error: `Nieuwe code ${user.access_code} gemaakt, maar de SMS mislukte: ${err.message}` });
-  }
-  res.json({ name: user.name });
-});
-
-let sendingAccess = false;
-
-// Sends to every guest without a sent SMS, so latecomers and failed sends are picked up on the next click.
-app.post('/api/admin/send-access', requireAdmin, requireOpenVoting, async (req, res) => {
-  if (sendingAccess) return res.status(409).json({ error: 'Er worden al berichten verstuurd.' });
-  sendingAccess = true;
-  let sent = 0;
-  const failed = [];
-  try {
-    for (const { guid } of db.listUsers().filter((u) => !u.is_admin && !u.sms_sent_at)) {
-      // Re-read: the guest may be deleted or have a new code while earlier SMS were sending.
-      const user = db.findUserByGuid(guid);
-      if (!user || user.is_admin || user.sms_sent_at) continue;
-      try {
-        await sendAccess(user);
-        sent++;
-      } catch (err) {
-        failed.push({ name: user.name, error: err.message });
-      }
-    }
-  } finally {
-    sendingAccess = false;
-  }
-  res.json({ sent, failed });
+  const user = db.renewAccessCode(target.guid);
+  res.json({ name: user.name, access_code: user.access_code });
 });
 
 app.post('/api/admin/close', requireAdmin, (req, res) => {
@@ -228,5 +198,4 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Halloween vote running on port ${PORT}, links point to ${PUBLIC_URL}`);
-  if (smsDryRun) console.log('SMS_GATEWAY_URL is not set: SMS messages are only logged, not sent.');
 });

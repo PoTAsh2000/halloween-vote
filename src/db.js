@@ -22,19 +22,20 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     guid        TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
-    phone       TEXT NOT NULL,
     access_code TEXT NOT NULL UNIQUE,
     vote        TEXT REFERENCES users(guid) ON DELETE SET NULL,
     allow_vote  INTEGER NOT NULL DEFAULT 1,
-    sms_sent_at TEXT,
+    copied_at   TEXT,
     is_admin    INTEGER NOT NULL DEFAULT 0
   );
 `);
 
-// Databases from before the admin account existed lack the column.
-if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'is_admin')) {
-  db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
-}
+// Bring databases from older versions up to the current columns.
+const columns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+if (!columns.has('is_admin')) db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
+// Invites used to go out by SMS; now the admin copies them by hand.
+if (columns.has('sms_sent_at')) db.exec('ALTER TABLE users RENAME COLUMN sms_sent_at TO copied_at');
+if (columns.has('phone')) db.exec('ALTER TABLE users DROP COLUMN phone');
 
 function newAccessCode() {
   const taken = db.prepare('SELECT 1 FROM users WHERE access_code = ?');
@@ -51,13 +52,13 @@ export function ensureAdmin() {
     ?? db.prepare('SELECT * FROM users WHERE name = ? COLLATE NOCASE').get(ADMIN_NAME);
   if (holder && holder.guid !== admin?.guid) renewAccessCode(holder.guid);
   if (admin) {
-    db.prepare('UPDATE users SET is_admin = 1, access_code = ?, sms_sent_at = NULL WHERE guid = ?')
+    db.prepare('UPDATE users SET is_admin = 1, access_code = ?, copied_at = NULL WHERE guid = ?')
       .run(ADMIN_CODE, admin.guid);
     return;
   }
   const guid = randomUUID();
-  db.prepare('INSERT INTO users (guid, name, phone, access_code, allow_vote, is_admin) VALUES (?, ?, ?, ?, ?, 1)')
-    .run(guid, ADMIN_NAME, '', ADMIN_CODE, isVotingClosed() ? 0 : 1);
+  db.prepare('INSERT INTO users (guid, name, access_code, allow_vote, is_admin) VALUES (?, ?, ?, ?, 1)')
+    .run(guid, ADMIN_NAME, ADMIN_CODE, isVotingClosed() ? 0 : 1);
 }
 
 // Codes from before the digits-only rule would lock their guest out; give them a new one.
@@ -93,10 +94,10 @@ export function isVotingClosed() {
   return Boolean(db.prepare('SELECT 1 FROM users WHERE allow_vote = 0 LIMIT 1').get());
 }
 
-export function createUser(name, phone) {
+export function createUser(name) {
   const guid = randomUUID();
-  db.prepare('INSERT INTO users (guid, name, phone, access_code, allow_vote) VALUES (?, ?, ?, ?, ?)')
-    .run(guid, name, phone, newAccessCode(), isVotingClosed() ? 0 : 1);
+  db.prepare('INSERT INTO users (guid, name, access_code, allow_vote) VALUES (?, ?, ?, ?)')
+    .run(guid, name, newAccessCode(), isVotingClosed() ? 0 : 1);
   return findUserByGuid(guid);
 }
 
@@ -110,14 +111,16 @@ export function setVote(voterGuid, targetGuid) {
     .run(targetGuid, voterGuid).changes > 0;
 }
 
-// A new code invalidates the old one, so the SMS has to go out again.
+// A new code invalidates the old one, so the invite has to go out again.
 export function renewAccessCode(guid) {
-  db.prepare('UPDATE users SET access_code = ?, sms_sent_at = NULL WHERE guid = ?').run(newAccessCode(), guid);
+  db.prepare('UPDATE users SET access_code = ?, copied_at = NULL WHERE guid = ?').run(newAccessCode(), guid);
   return findUserByGuid(guid);
 }
 
-export function markSmsSent(guid) {
-  db.prepare('UPDATE users SET sms_sent_at = ? WHERE guid = ?').run(new Date().toISOString(), guid);
+export function markCopied(guid) {
+  const copiedAt = new Date().toISOString();
+  db.prepare('UPDATE users SET copied_at = ? WHERE guid = ?').run(copiedAt, guid);
+  return copiedAt;
 }
 
 export function closeVoting() {

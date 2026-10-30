@@ -138,7 +138,7 @@
       show('login');
     };
 
-    // The SMS link carries the code; prefill it so the guest only taps "Inloggen".
+    // The invite link carries the code; prefill it so the guest only taps "Inloggen".
     const codeFromLink = new URLSearchParams(location.search).get('code');
     if (codeFromLink) {
       $('code').value = codeFromLink.replace(/\D/g, '').slice(0, 6);
