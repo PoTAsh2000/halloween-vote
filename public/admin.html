@@ -27,11 +27,14 @@
         <span id="progress" class="muted"></span>
       </div>
 
-      <div id="winner" class="winner" hidden>
-        <p id="winner-label" class="label"></p>
-        <p id="winner-names" class="names"></p>
-        <p id="winner-votes" class="muted"></p>
-      </div>
+      <section id="results" class="results" hidden>
+        <div class="winner">
+          <p id="winner-label" class="label"></p>
+          <p id="winner-names" class="names"></p>
+          <p id="winner-votes" class="muted"></p>
+        </div>
+        <ol id="result-list" class="result-list"></ol>
+      </section>
 
       <form id="add" class="add-form">
         <input id="name" placeholder="Naam" maxlength="40" aria-label="Naam" required>
@@ -39,6 +42,7 @@
       </form>
 
       <div class="actions">
+        <button id="open" type="button">Start stemming</button>
         <button id="close" type="button" class="danger">Sluit stemming</button>
       </div>
       <p id="message" class="status" role="status"></p>
@@ -46,13 +50,18 @@
       <ul id="guests" class="guests"></ul>
       <p id="empty" class="muted" hidden>Nog geen gasten. Voeg ze hierboven toe.</p>
       <p class="muted">Tip: je staat zelf al op de lijst als admin, dus je kunt ook stemmen en op je stemmen.</p>
-      <button id="logout" type="button" class="link">Uitloggen</button>
+      <div class="links">
+        <a href="/" class="link">Naar stempagina</a>
+        <button id="logout" type="button" class="link">Uitloggen</button>
+      </div>
     </section>
   </main>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    let data = { closed: false, users: [] };
+    let data = { voting: 'pending', users: [] };
+
+    const STATE_LABELS = { pending: 'Nog niet gestart', open: 'Stemming open', closed: 'Stemming gesloten' };
 
     function show(id) {
       for (const section of ['login', 'dashboard']) $(section).hidden = section !== id;
@@ -85,17 +94,20 @@
     }
 
     function render() {
-      const { closed, users } = data;
+      const { voting, users } = data;
+      const closed = voting === 'closed';
       const voted = users.filter((u) => u.has_voted).length;
       const notCopied = users.filter((u) => !u.is_admin && !u.copied_at).length;
 
-      $('state').textContent = closed ? 'Stemming gesloten' : 'Stemming open';
-      $('state').className = closed ? 'pill closed' : 'pill';
+      $('state').textContent = STATE_LABELS[voting];
+      $('state').className = `pill ${voting}`;
       $('progress').textContent = `${voted} van ${users.length} gestemd`
         + (!closed && notCopied ? `, ${notCopied} nog niet uitgenodigd` : '');
       $('add').hidden = closed;
-      $('close').hidden = closed;
-      $('close').disabled = users.length === 0;
+      $('open').hidden = voting === 'open';
+      $('open').textContent = closed ? 'Heropen stemming' : 'Start stemming';
+      $('close').hidden = voting !== 'open';
+      $('results').hidden = !closed;
       $('empty').hidden = users.length > 0;
 
       $('guests').replaceChildren(...users.map((u) => {
@@ -133,23 +145,28 @@
       }));
     }
 
-    async function renderWinner() {
-      const { ok, data: result } = await api('GET', '/api/admin/winner');
+    async function renderResults() {
+      const { ok, data: result } = await api('GET', '/api/admin/results');
       if (!ok) return;
-      const winners = result.winners;
-      $('winner').hidden = false;
+      const winners = result.results.filter((r) => r.winner);
       if (winners.length === 0) {
         $('winner-label').textContent = 'Uitslag';
         $('winner-names').textContent = 'Niemand heeft gestemd';
         $('winner-votes').textContent = '';
-        return;
+      } else {
+        const votes = winners[0].votes;
+        const names = winners.map((w) => w.name);
+        $('winner-label').textContent = winners.length === 1 ? 'Winnaar' : 'Gelijkspel';
+        $('winner-names').textContent = names.length === 1 ? names[0]
+          : `${names.slice(0, -1).join(', ')} en ${names.at(-1)}`;
+        $('winner-votes').textContent = `${votes} ${votes === 1 ? 'stem' : 'stemmen'}`
+          + (winners.length > 1 ? ' elk. Beslis de winnaar met een spel!' : '');
       }
-      const votes = winners[0].votes;
-      const names = winners.map((w) => w.name);
-      $('winner-label').textContent = winners.length === 1 ? 'Winnaar' : 'Gedeelde winnaars';
-      $('winner-names').textContent = names.length === 1 ? names[0]
-        : `${names.slice(0, -1).join(', ')} en ${names.at(-1)}`;
-      $('winner-votes').textContent = `${votes} ${votes === 1 ? 'stem' : 'stemmen'}${winners.length > 1 ? ' elk' : ''}`;
+      $('result-list').replaceChildren(...result.results.map((r) => {
+        const li = el('li', r.winner ? 'result winner-row' : 'result');
+        li.append(el('span', 'result-name', r.name), el('span', 'result-votes', `${r.votes} ${r.votes === 1 ? 'stem' : 'stemmen'}`));
+        return li;
+      }));
     }
 
     async function load() {
@@ -159,7 +176,7 @@
       data = result;
       render();
       show('dashboard');
-      if (data.closed) renderWinner();
+      if (data.voting === 'closed') renderResults();
     }
 
     // The Clipboard API only works on https or localhost; fall back to a hidden textarea on plain http.
@@ -233,10 +250,21 @@
       load();
     };
 
+    $('open').onclick = async () => {
+      const reopen = data.voting === 'closed';
+      const question = reopen
+        ? 'Stemming heropenen? Uitgebrachte stemmen blijven staan en gasten kunnen weer stemmen of wisselen.'
+        : 'Stemming starten? Alle gasten op de lijst kunnen dan stemmen. Later toegevoegde gasten ook.';
+      if (!confirm(question)) return;
+      const { ok, data: result } = await api('POST', '/api/admin/open');
+      say(ok ? (reopen ? 'Stemming heropend.' : 'Stemming gestart.') : result.error ?? 'Starten mislukt.', !ok);
+      load();
+    };
+
     $('close').onclick = async () => {
       const notVoted = data.users.filter((u) => !u.has_voted).length;
       const warning = notVoted ? `\n\nLet op: ${notVoted} ${notVoted === 1 ? 'gast heeft' : 'gasten hebben'} nog niet gestemd.` : '';
-      if (!confirm(`Stemming sluiten? Daarna kan niemand meer stemmen of inloggen. Dit kun je niet terugdraaien.${warning}`)) return;
+      if (!confirm(`Stemming sluiten? Daarna kan niemand meer stemmen of inloggen en zie je de uitslag. Je kunt de stemming later heropenen.${warning}`)) return;
       const { ok, data: result } = await api('POST', '/api/admin/close');
       say(ok ? 'Stemming gesloten.' : result.error ?? 'Sluiten mislukt.', !ok);
       load();

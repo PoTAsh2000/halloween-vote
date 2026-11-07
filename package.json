@@ -6,7 +6,8 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/server.js"
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "build": "node scripts/build-dist.js"
   },
   "engines": {
     "node": ">=24"

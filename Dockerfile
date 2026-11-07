@@ -11,7 +11,7 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY public ./public
 
-RUN mkdir -p /data && chown node:node /data
+RUN chmod -R a+rX /app && mkdir -p /data && chown node:node /data
 USER node
 VOLUME /data
 EXPOSE 3000

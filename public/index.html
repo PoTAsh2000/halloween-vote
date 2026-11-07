@@ -22,22 +22,27 @@
 
     <section id="vote" class="stack" hidden>
       <p>Hoi <strong id="me"></strong>! Wie heeft de beste outfit? Tik op een naam.</p>
+      <p id="pending" class="notice" hidden>De stemming is nog niet gestart. Zodra hij begint kun je hier stemmen; deze pagina ververst vanzelf.</p>
       <div id="candidates" class="choices"></div>
       <p id="no-candidates" class="muted" hidden>Er staan nog geen andere gasten op de lijst.</p>
       <button id="confirm" type="button" disabled>Kies iemand</button>
       <p id="vote-status" class="status" role="status"></p>
-      <button id="logout" type="button" class="link">Uitloggen</button>
+      <div class="links">
+        <a id="to-admin" href="/admin" class="link" hidden>Naar adminpaneel</a>
+        <button id="logout" type="button" class="link">Uitloggen</button>
+      </div>
     </section>
 
     <section id="closed" class="stack center" hidden>
       <p class="big">De stemming is gesloten.</p>
       <p class="muted">De winnaar wordt zo bekendgemaakt!</p>
+      <a id="closed-to-admin" href="/admin" class="link" hidden>Naar adminpaneel</a>
     </section>
   </main>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    let state = { vote: null, selected: null, candidates: [] };
+    let state = { voting: 'pending', vote: null, selected: null, candidates: [] };
 
     function show(id) {
       for (const section of ['login', 'vote', 'closed']) $(section).hidden = section !== id;
@@ -75,20 +80,32 @@
       }));
       $('no-candidates').hidden = state.candidates.length > 0;
 
+      const pending = state.voting !== 'open';
+      $('pending').hidden = !pending;
       const selected = state.candidates.find((c) => c.guid === state.selected);
       const confirm = $('confirm');
-      confirm.disabled = !selected || state.selected === state.vote;
-      confirm.textContent = !selected ? 'Kies iemand'
+      confirm.disabled = pending || !selected || state.selected === state.vote;
+      const voted = state.candidates.find((c) => c.guid === state.vote);
+      confirm.textContent = pending ? 'Wacht tot de stemming start'
+        : !selected ? (voted ? `Je stem staat op ${voted.name}` : 'Kies iemand')
         : state.selected === state.vote ? `Je stem staat op ${selected.name}`
         : `Bevestig stem op ${selected.name}`;
     }
 
+    function showClosed(data) {
+      $('closed-to-admin').hidden = !data.is_admin;
+      show('closed');
+    }
+
     async function loadMe() {
       const { status, data } = await api('GET', '/api/me');
-      if (status === 403) return show('closed');
+      if (status === 403) return showClosed(data);
       if (status !== 200) return show('login');
-      state = { vote: data.vote, selected: data.vote, candidates: data.candidates };
+      // Nobody is selected after login; a choice the guest made but did not confirm yet survives refreshes.
+      const selected = data.candidates.some((c) => c.guid === state.selected) ? state.selected : null;
+      state = { voting: data.voting, vote: data.vote, selected, candidates: data.candidates };
       $('me').textContent = data.name;
+      $('to-admin').hidden = !data.is_admin;
       render();
       show('vote');
     }
@@ -104,7 +121,7 @@
         return;
       }
       const { status, data } = await api('POST', '/api/login', { code: $('code').value });
-      if (status === 403) return show('closed');
+      if (status === 403) return showClosed(data);
       if (status !== 200) {
         $('login-error').textContent = data.error ?? 'Inloggen mislukt.';
         return;
@@ -117,8 +134,9 @@
       const confirm = $('confirm');
       confirm.disabled = true;
       const { status, data } = await api('PUT', '/api/vote', { guid: state.selected });
-      if (status === 403) return show('closed');
+      if (status === 403) return showClosed(data);
       if (status === 401) return show('login');
+      if (status === 409) return loadMe();
       const message = $('vote-status');
       if (status !== 200) {
         message.className = 'status error';
@@ -146,6 +164,11 @@
     } else {
       loadMe();
     }
+
+    // Follow the admin starting, closing or reopening the vote without a manual refresh.
+    setInterval(() => {
+      if (!document.hidden && $('login').hidden) loadMe();
+    }, 10_000);
   </script>
 </body>
 </html>

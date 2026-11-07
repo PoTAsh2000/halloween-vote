@@ -47,9 +47,8 @@ function inviteText(user) {
   return [
     `Hoi ${user.name}! 🎃 Stem vanavond op de beste Halloween-outfit.`,
     `1. Open ${link}`,
-    `2. Je code staat al ingevuld (anders typ je ${user.access_code}), tik op Inloggen.`,
+    `2. Je code staat al ingevuld (anders type je zelf je toegangscode: ${user.access_code}), klik op Inloggen.`,
     '3. Kies je favoriete outfit. Op jezelf stemmen kan niet, wisselen mag zolang de stemming open is.',
-    `Je toegangscode: ${user.access_code}`,
   ].join('\n');
 }
 
@@ -64,7 +63,10 @@ app.get('/admin', (req, res) => res.sendFile('admin.html', { root: PUBLIC_DIR })
 function requireUser(req, res, next) {
   const user = db.findUserByCode(readCookie(req, USER_COOKIE));
   if (!user) return res.status(401).json({ error: 'Niet ingelogd.' });
-  if (!user.allow_vote) return res.status(403).json({ error: 'De stemming is gesloten.' });
+  // is_admin lets the closed page offer the admin a way back to the admin panel.
+  if (db.getVotingState() === 'closed') {
+    return res.status(403).json({ error: 'De stemming is gesloten.', is_admin: Boolean(user.is_admin) });
+  }
   req.user = user;
   next();
 }
@@ -89,7 +91,10 @@ function loginWithCode(req, res) {
 app.post('/api/login', (req, res) => {
   const user = loginWithCode(req, res);
   if (!user) return;
-  if (!user.allow_vote) return res.status(403).json({ error: 'De stemming is gesloten.' });
+  // is_admin lets the closed page offer the admin a way back to the admin panel.
+  if (db.getVotingState() === 'closed') {
+    return res.status(403).json({ error: 'De stemming is gesloten.', is_admin: Boolean(user.is_admin) });
+  }
   res.cookie(USER_COOKIE, user.access_code, COOKIE_OPTIONS);
   res.json({ name: user.name });
 });
@@ -99,11 +104,19 @@ app.post('/api/logout', (req, res) => {
   res.status(204).end();
 });
 
+// Before the admin starts voting, guests can log in and see the list but not vote yet.
 app.get('/api/me', requireUser, (req, res) => {
-  res.json({ name: req.user.name, vote: req.user.vote, candidates: db.listCandidates(req.user.guid) });
+  res.json({
+    name: req.user.name,
+    is_admin: Boolean(req.user.is_admin),
+    voting: db.getVotingState(),
+    vote: req.user.vote,
+    candidates: db.listCandidates(req.user.guid),
+  });
 });
 
 app.put('/api/vote', requireUser, (req, res) => {
+  if (db.getVotingState() !== 'open') return res.status(409).json({ error: 'De stemming is nog niet gestart.' });
   const target = db.findUserByGuid(String(req.body?.guid ?? ''));
   if (!target || target.guid === req.user.guid) {
     return res.status(400).json({ error: 'Op deze persoon kun je niet stemmen.' });
@@ -121,8 +134,9 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-function requireOpenVoting(req, res, next) {
-  if (db.isVotingClosed()) return res.status(409).json({ error: 'De stemming is gesloten.' });
+// Guests can be added and invited before and during voting, not after it closed.
+function requireNotClosed(req, res, next) {
+  if (db.getVotingState() === 'closed') return res.status(409).json({ error: 'De stemming is gesloten.' });
   next();
 }
 
@@ -137,7 +151,7 @@ app.post('/api/admin/login', (req, res) => {
 // Admin sees whether someone voted, never on whom.
 app.get('/api/admin/users', requireAdmin, (req, res) => {
   res.json({
-    closed: db.isVotingClosed(),
+    voting: db.getVotingState(),
     users: db.listUsers().map((u) => ({
       guid: u.guid,
       name: u.name,
@@ -150,7 +164,7 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
   });
 });
 
-app.post('/api/admin/users', requireAdmin, (req, res) => {
+app.post('/api/admin/users', requireAdmin, requireNotClosed, (req, res) => {
   const name = String(req.body?.name ?? '').trim();
   if (!name || name.length > 40) return res.status(400).json({ error: 'Vul een naam in (max 40 tekens).' });
   if (db.nameExists(name)) {
@@ -165,14 +179,14 @@ app.delete('/api/admin/users/:guid', requireAdmin, (req, res) => {
 });
 
 // The admin marks an invite as copied, so the list shows who still needs one. Copying again just updates the time.
-app.post('/api/admin/users/:guid/copied', requireAdmin, requireOpenVoting, (req, res) => {
+app.post('/api/admin/users/:guid/copied', requireAdmin, requireNotClosed, (req, res) => {
   const target = db.findUserByGuid(req.params.guid);
   if (!target) return res.status(404).json({ error: 'Gast niet gevonden.' });
   res.json({ copied_at: db.markCopied(target.guid) });
 });
 
 // A new code makes the old invite useless, so the admin has to copy and send a fresh one.
-app.post('/api/admin/users/:guid/renew-code', requireAdmin, requireOpenVoting, (req, res) => {
+app.post('/api/admin/users/:guid/renew-code', requireAdmin, requireNotClosed, (req, res) => {
   const target = db.findUserByGuid(req.params.guid);
   if (!target) return res.status(404).json({ error: 'Gast niet gevonden.' });
   if (target.is_admin) return res.status(400).json({ error: 'De code van de admin staat vast.' });
@@ -180,14 +194,22 @@ app.post('/api/admin/users/:guid/renew-code', requireAdmin, requireOpenVoting, (
   res.json({ name: user.name, access_code: user.access_code });
 });
 
-app.post('/api/admin/close', requireAdmin, (req, res) => {
-  db.closeVoting();
+// Starts voting, or reopens it after closing; votes already cast stay.
+app.post('/api/admin/open', requireAdmin, (req, res) => {
+  db.setVotingState('open');
   res.status(204).end();
 });
 
-app.get('/api/admin/winner', requireAdmin, (req, res) => {
-  if (!db.isVotingClosed()) return res.status(409).json({ error: 'Sluit eerst de stemming.' });
-  res.json({ winners: db.getWinners() });
+app.post('/api/admin/close', requireAdmin, (req, res) => {
+  if (db.getVotingState() !== 'open') return res.status(409).json({ error: 'De stemming is niet open.' });
+  db.setVotingState('closed');
+  res.status(204).end();
+});
+
+// Vote counts stay hidden until voting closes, also for the admin.
+app.get('/api/admin/results', requireAdmin, (req, res) => {
+  if (db.getVotingState() !== 'closed') return res.status(409).json({ error: 'Sluit eerst de stemming.' });
+  res.json({ results: db.getResults() });
 });
 
 app.use((err, req, res, next) => {

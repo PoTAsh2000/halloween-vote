@@ -105,6 +105,10 @@ button.link {
   text-decoration: underline;
 }
 button.link:hover:not(:disabled) { background: none; color: var(--text); }
+a.link { font-size: .95rem; color: var(--muted); }
+a.link:hover { color: var(--text); }
+a.link[hidden] { display: none; }
+.links { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 16px; align-items: center; }
 
 .error { min-height: 1.5em; color: var(--red); }
 .status { min-height: 1.5em; color: var(--green); }
@@ -124,7 +128,10 @@ button.link:hover:not(:disabled) { background: none; color: var(--text); }
   background: var(--field);
   border: 2px solid var(--line);
 }
-.choice:hover:not(:disabled) { background: #1a1220; border-color: #5a4470; }
+/* Only real pointers get a hover look: on phones it sticks to whatever is under the last tap. */
+@media (hover: hover) {
+  .choice:hover:not(:disabled) { background: #1a1220; border-color: #5a4470; }
+}
 .choice[aria-pressed="true"],
 .choice[aria-pressed="true"]:hover { background: var(--orange-soft); border-color: var(--orange); }
 .tag {
@@ -134,6 +141,14 @@ button.link:hover:not(:disabled) { background: none; color: var(--text); }
   letter-spacing: .06em;
   text-transform: uppercase;
   color: var(--orange);
+}
+
+.notice {
+  padding: 10px 14px;
+  font-size: .9rem;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 10px;
 }
 
 .big { font-size: 1.3rem; font-weight: 650; }
@@ -156,6 +171,7 @@ button.link:hover:not(:disabled) { background: none; color: var(--text); }
   background: #13281b;
 }
 .pill.closed { color: var(--red); background: #2d1616; }
+.pill.pending { color: var(--orange); background: var(--orange-soft); }
 
 .winner {
   padding: 20px;
@@ -166,6 +182,24 @@ button.link:hover:not(:disabled) { background: none; color: var(--text); }
 }
 .winner .label { font-size: .85rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--orange); }
 .winner .names { margin: 6px 0; font: 400 2.2rem/1.15 Creepster, system-ui, sans-serif; letter-spacing: 1px; }
+
+.results { display: grid; gap: 12px; }
+.result-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.result {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--field);
+  border: 2px solid var(--line);
+  border-radius: 999px;
+}
+.result-name { font-weight: 600; overflow-wrap: anywhere; }
+.result-votes { flex: none; font-size: .9rem; color: var(--muted); }
+/* Everyone with the most votes gets the green ring, so a tie shows several. */
+.result.winner-row { color: var(--green); background: #13281b; border-color: var(--green); }
+.result.winner-row .result-votes { color: var(--green); }
 
 .add-form { display: flex; flex-wrap: wrap; gap: 8px; }
 .add-form input { flex: 1 1 160px; }
